@@ -9,6 +9,13 @@ import uvicorn
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from database import SessionLocal, engine
+from models import PlayerModel
+from database import Base
+from pydantic import BaseModel
+
 
 
 app = FastAPI()
