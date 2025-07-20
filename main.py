@@ -1,10 +1,13 @@
-from fastapi import FastAPI, HTTPException, Depends
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import Column, String, Integer, Boolean, ForeignKey, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
+from passlib.context import CryptContext
 import os
 import random
+import smtplib
+from email.mime.text import MIMEText
 from dotenv import load_dotenv
 
 if __name__ == "__main__":
@@ -14,11 +17,21 @@ if __name__ == "__main__":
 # Load environment variables
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
+EMAIL_SENDER = os.getenv("EMAIL_SENDER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 # Setup DB
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(password):
+    return pwd_context.hash(password)
+
+def verify_password(plain, hashed):
+    return pwd_context.verify(plain, hashed)
 
 # Define DB Models
 class PlayerModel(Base):
@@ -42,6 +55,12 @@ class InventoryModel(Base):
     sigil_protection = Column(Integer, default=0)
     player = relationship("PlayerModel", back_populates="inventory")
 
+class AccountModel(Base):
+    __tablename__ = "accounts"
+    email = Column(String, primary_key=True, index=True)
+    password_hash = Column(String)
+    is_verified = Column(Boolean, default=False)
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -57,6 +76,14 @@ def get_db():
         db.close()
 
 # Pydantic Schemas
+class AccountRegister(BaseModel):
+    email: EmailStr
+    password: str
+
+class AccountLogin(BaseModel):
+    email: EmailStr
+    password: str
+
 class Player(BaseModel):
     player_id: str
     username: str
@@ -72,7 +99,55 @@ class UpgradeResponse(BaseModel):
     glow: bool = False
     message: str
 
+# Helper: Send email
+def send_confirmation_email(to_email: str):
+    subject = "Confirm your account"
+    body = f"Click to confirm your account: https://your-game-server.com/confirm_email?email={to_email}"
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = to_email
+
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        smtp.send_message(msg)
+
 # Routes
+@app.post("/register_account")
+def register_account(data: AccountRegister, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    existing = db.query(AccountModel).filter_by(email=data.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Account already exists")
+
+    account = AccountModel(
+        email=data.email,
+        password_hash=hash_password(data.password)
+    )
+    db.add(account)
+    db.commit()
+
+    background_tasks.add_task(send_confirmation_email, to_email=data.email)
+
+    return {"message": "Registration successful. Please check your email."}
+
+@app.get("/confirm_email")
+def confirm_email(email: str, db: Session = Depends(get_db)):
+    account = db.query(AccountModel).filter_by(email=email).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    account.is_verified = True
+    db.commit()
+    return {"message": "Email confirmed. You may now log in."}
+
+@app.post("/login")
+def login(data: AccountLogin, db: Session = Depends(get_db)):
+    account = db.query(AccountModel).filter_by(email=data.email).first()
+    if not account or not verify_password(data.password, account.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not account.is_verified:
+        raise HTTPException(status_code=403, detail="Email not verified")
+    return {"message": "Login successful"}
+
 @app.post("/register")
 def register_player(player: Player, db: Session = Depends(get_db)):
     existing = db.query(PlayerModel).filter_by(player_id=player.player_id).first()
@@ -82,7 +157,7 @@ def register_player(player: Player, db: Session = Depends(get_db)):
     new_player = PlayerModel(player_id=player.player_id, username=player.username)
     new_weapon = WeaponModel(player_id=player.player_id, upgrade_level=10)
     new_inventory = InventoryModel(player_id=player.player_id, sigil_protection=1)
-    
+
     db.add(new_player)
     db.add(new_weapon)
     db.add(new_inventory)
