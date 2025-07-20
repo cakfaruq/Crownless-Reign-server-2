@@ -6,6 +6,10 @@ from sqlalchemy.orm import sessionmaker, Session
 import os
 import random
 from dotenv import load_dotenv
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+
 
 # Load environment variables
 load_dotenv()
